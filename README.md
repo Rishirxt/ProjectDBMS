@@ -9,7 +9,7 @@ A React, Express and PostgreSQL academic project for a **free campus medical cen
 - Doctor directory, weekly availability, generated 30-minute slots and database-enforced double-booking prevention
 - Patient appointment history, cancellation, notices and prescriptions
 - Doctor consultations, appointment completion, prescriptions and availability management
-- Admin departments, doctors, appointments, notices and aggregate reports
+- Admin departments, doctors, appointment completion and rescheduling, notices and aggregate reports
 - Student campus block and study year, visible in staff student search
 - Free online medicine ordering with stock reservation and collection statuses (no payment flow)
 - Emergency ambulance requests with staff assignment and live status management
@@ -44,7 +44,7 @@ The web app runs at `http://localhost:5173`; the API runs at `http://localhost:5
 - `GET /api/departments`, `POST/PUT/DELETE /api/departments/:id`
 - `GET/POST /api/doctors`, `GET /api/doctors/:id/availability`
 - `GET /api/doctors/:id/slots?date=YYYY-MM-DD`
-- `GET/POST/PUT /api/appointments`
+- `GET/POST/PUT /api/appointments`, `PUT /api/appointments/:id/reschedule` (staff/admin)
 - `GET/POST /api/prescriptions`, `GET/POST /api/notices`
 - `GET /api/reports` (admin)
 - `/api/pharmacy/*`, `/api/ambulance-requests`, `/api/ambulances`, `/api/referrals/*` (role checked)

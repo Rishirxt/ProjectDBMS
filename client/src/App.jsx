@@ -186,7 +186,7 @@ function Signup() {
           onChange={(v) => setF({ ...f, department: v })}
         />
         <label>Campus block<select required value={f.block} onChange={(e) => setF({ ...f, block: e.target.value })}><option value="">Select your block</option>{["Block A","Block B","Block D","Block E","Block F"].map((b)=><option key={b}>{b}</option>)}</select></label>
-        <label>Year of study<select required value={f.academicYear} onChange={(e) => setF({ ...f, academicYear: e.target.value })}><option value="">Select year</option>{[1,2,3,4,5,6].map((y)=><option key={y} value={y}>Year {y}</option>)}</select></label>
+        <label>Year of study<select required value={f.academicYear} onChange={(e) => setF({ ...f, academicYear: e.target.value })}><option value="">Select year</option>{[1,2,3,4,5].map((y)=><option key={y} value={y}>Year {y}</option>)}</select></label>
         <details>
           <summary>Optional profile and emergency details</summary>
           <Input label="Date of birth" type="date" required={false} value={f.dateOfBirth} onChange={(v) => setF({ ...f, dateOfBirth: v })} />
@@ -647,7 +647,15 @@ function Appointments({ rows: initial }) {
               <td>{a.department}</td>
               <td>{fmt(a.appointment_time)}</td>
               <td>
-                <span className={"badge " + a.status}>{a.status}</span>
+                <span className={`badge ${a.status === "scheduled" && a.rescheduled_at ? "rescheduled" : a.status}`}>
+                  {a.rescheduled_at && a.status === "scheduled"
+                    ? "Rescheduled"
+                    : a.status === "completed"
+                      ? "Completed and closed"
+                      : a.status === "cancelled"
+                        ? "Cancelled and closed"
+                        : "Scheduled"}
+                </span>
               </td>
               <td>
                 {user.role === "student" && a.status === "scheduled" && (
@@ -963,12 +971,61 @@ function StudentSearch() {
   </>;
 }
 function StaffAppointments() {
-  const [rows, setRows] = useState([]), [doctors, setDoctors] = useState([]), [departments, setDepartments] = useState([]), [filters, setFilters] = useState({ search: '', date: '', doctorId: '', departmentId: '', status: '' });
+  const { user } = useAuth();
+  const [rows, setRows] = useState([]);
+  const [doctors, setDoctors] = useState([]);
+  const [departments, setDepartments] = useState([]);
+  const [filters, setFilters] = useState({ search: '', date: '', doctorId: '', departmentId: '', status: '' });
+  const [message, setMessage] = useState('');
   const load = () => api.get('/appointments', { params: filters }).then((r) => setRows(r.data));
-  useEffect(() => { api.get('/doctors').then((r) => setDoctors(r.data)); api.get('/departments').then((r) => setDepartments(r.data)); }, []);
+  useEffect(() => {
+    api.get('/doctors').then((r) => setDoctors(r.data));
+    api.get('/departments').then((r) => setDepartments(r.data));
+  }, []);
   useEffect(() => { load(); }, [filters.search, filters.date, filters.doctorId, filters.departmentId, filters.status]);
-  const update = async (id, status) => { await api.put(`/appointments/${id}`, { status }); load(); };
-  return <><h3>Hospital appointments</h3><div className="panel inline"><input placeholder="Student username or name" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} /><input type="date" value={filters.date} onChange={(e) => setFilters({ ...filters, date: e.target.value })} /><select value={filters.doctorId} onChange={(e) => setFilters({ ...filters, doctorId: e.target.value })}><option value="">All doctors</option>{doctors.map((d) => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select><select value={filters.departmentId} onChange={(e) => setFilters({ ...filters, departmentId: e.target.value })}><option value="">All departments</option>{departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</select><select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value="">All statuses</option>{['scheduled', 'completed', 'cancelled'].map((x) => <option key={x}>{x}</option>)}</select></div><div className="tablewrap"><table><thead><tr><th>Date</th><th>Time</th><th>Student</th><th>Username</th><th>Doctor</th><th>Department</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows.map((a) => <tr key={a.id}><td>{date(a.appointment_date)}</td><td>{fmt(a.appointment_time)}</td><td>{a.patient_name}</td><td>{a.patient_username}</td><td>{a.doctor_name}</td><td>{a.department}</td><td>{a.reason}</td><td>{a.status}</td><td>{a.status === 'scheduled' && <button className="textbtn" onClick={() => update(a.id, 'completed')}>Complete</button>}</td></tr>)}{!rows.length && <tr><td colSpan="9" className="muted">No appointments found.</td></tr>}</tbody></table></div></>;
+
+  const update = async (id, status) => {
+    try {
+      await api.put(`/appointments/${id}`, { status });
+      setMessage(status === 'completed' ? 'Appointment closed as completed.' : 'Appointment cancelled and closed.');
+      load();
+    } catch (error) {
+      setMessage(error.response?.data?.message || 'Could not update appointment.');
+    }
+  };
+  return <>
+    <h3>{user.role === 'admin' ? 'Manage student appointments' : 'Hospital appointments'}</h3>
+    <div className="panel inline">
+      <input placeholder="Student username or name" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} />
+      <input type="date" value={filters.date} onChange={(e) => setFilters({ ...filters, date: e.target.value })} />
+      <select value={filters.doctorId} onChange={(e) => setFilters({ ...filters, doctorId: e.target.value })}>
+        <option value="">All doctors</option>{doctors.map((d) => <option key={d.id} value={d.id}>{d.full_name}</option>)}
+      </select>
+      <select value={filters.departmentId} onChange={(e) => setFilters({ ...filters, departmentId: e.target.value })}>
+        <option value="">All departments</option>{departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+      </select>
+      <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+        <option value="">All statuses</option>{['scheduled', 'completed', 'cancelled'].map((x) => <option key={x}>{x}</option>)}
+      </select>
+    </div>
+    {message && <p className="notice" role="status">{message}</p>}
+    <div className="tablewrap"><table>
+      <thead><tr><th>Date</th><th>Time</th><th>Student</th><th>Username</th><th>Doctor</th><th>Department</th><th>Reason</th><th>Status</th><th>Action</th></tr></thead>
+      <tbody>
+        {rows.map((a) => (
+          <tr key={a.id}>
+            <td>{date(a.appointment_date)}</td><td>{fmt(a.appointment_time)}</td><td>{a.patient_name}</td><td>{a.patient_username}</td>
+            <td>{a.doctor_name}</td><td>{a.department}</td><td>{a.reason}</td><td>{a.status}</td>
+            <td>{a.status === 'scheduled' && <div className="appointment-actions">
+              <button type="button" className="appointment-action complete" title="Completed and closed" aria-label={`Mark appointment ${a.id} completed and closed`} onClick={() => update(a.id, 'completed')}>✓</button>
+              <button type="button" className="appointment-action cancel" title="Cancelled and closed" aria-label={`Cancel and close appointment ${a.id}`} onClick={() => update(a.id, 'cancelled')}>×</button>
+            </div>}</td>
+          </tr>
+        ))}
+        {!rows.length && <tr><td colSpan="9" className="muted">No appointments found.</td></tr>}
+      </tbody>
+    </table></div>
+  </>;
 }
 function StaffPrescriptions() {
   const [username, setUsername] = useState(''), [student, setStudent] = useState(null), [history, setHistory] = useState([]), [message, setMessage] = useState(''), [form, setForm] = useState({ diagnosis: '', medicines: '', instructions: '', prescriptionNotes: '' });
@@ -1112,7 +1169,7 @@ function Ambulances() {
  const {user}=useAuth(); const [rows,setRows]=useState([]),[units,setUnits]=useState([]);const load=()=>Promise.all([api.get('/ambulance-requests'),api.get('/ambulances')]).then(([r,u])=>{setRows(r.data);setUnits(u.data)});useEffect(()=>{load()},[]);const update=async(id,status,ambulanceId)=>{await api.put(`/ambulance-requests/${id}`,{status,ambulanceId:ambulanceId||undefined});load()};return <><h3>Emergency requests</h3>{user.role==='admin'&&<form className="panel inline" onSubmit={async e=>{e.preventDefault();const d=new FormData(e.currentTarget);await api.post('/ambulances',{vehicleCode:d.get('vehicle')});e.currentTarget.reset();load()}}><input name="vehicle" required placeholder="Ambulance vehicle code"/><button>Add ambulance</button></form>}<div className="tablewrap"><table><thead><tr><th>Request</th><th>Student</th><th>Username</th><th>Block</th><th>Time</th><th>Ambulance</th><th>Status</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}><td>{r.request_code}</td><td>{r.patient_name}</td><td>{r.patient_username}</td><td>{r.block}</td><td>{date(r.requested_at)}</td><td><select value={r.ambulance_id||''} onChange={e=>update(r.id,'Assigned',e.target.value)}><option value="">Unassigned</option>{units.map(u=><option key={u.id} value={u.id}>{u.vehicle_code}</option>)}</select></td><td><select value={r.status} onChange={e=>update(r.id,e.target.value,r.ambulance_id)}>{['Requested','Assigned','Ambulance Dispatched','Arrived','Completed','Cancelled'].map(s=><option key={s}>{s}</option>)}</select></td></tr>)}</tbody></table></div></>;
 }
 function Referrals() {
- const {user}=useAuth(),[rows,setRows]=useState([]),[hospitals,setHospitals]=useState([]),[units,setUnits]=useState([]),[message,setMessage]=useState('');const load=()=>api.get('/referrals').then(r=>setRows(r.data));useEffect(()=>{load();if(user.role!=='student'){api.get('/referrals/hospitals').then(r=>setHospitals(r.data));api.get('/ambulances').then(r=>setUnits(r.data))}},[]);const create=async e=>{e.preventDefault();const d=new FormData(e.currentTarget);try{await api.post('/referrals',{username:d.get('username'),hospitalId:Number(d.get('hospital')),reason:d.get('reason'),medicalNotes:d.get('notes'),ambulanceRequired:d.get('ambulance')==='yes'});setMessage('Referral created.');e.currentTarget.reset();load()}catch(e){setMessage(e.response?.data?.message||'Could not create referral.')}};const update=async(id,status,ambulanceId)=>{await api.put(`/referrals/${id}`,{status,ambulanceId:ambulanceId||undefined});load()};return <><h3>{user.role==='student'?'My hospital referrals':'Hospital referrals'}</h3>{message&&<p className="notice">{message}</p>}{user.role!=='student'&&<form className="panel booking" onSubmit={create}><label>Student username<input name="username" required placeholder="24BAI1278"/></label><label>External hospital<select required name="hospital"><option value="">Select hospital</option>{hospitals.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}</select></label><label>Referral reason<textarea name="reason" required/></label><label>Medical notes<textarea name="notes"/></label><label>Ambulance required<select name="ambulance"><option value="no">No</option><option value="yes">Yes</option></select></label><button>Generate referral</button></form>}<div className="list">{rows.map(r=><article className="panel" key={r.id}><b>{r.referral_code} · {r.hospital}</b><p>{r.patient_name} · {r.patient_username} · {r.block}</p><p>{r.reason}</p><p>Ambulance: {r.vehicle_code|| (r.ambulance_required?'Required':'No')} · Status: <b>{r.status}</b> · Created {date(r.created_at)}</p>{user.role!=='student'&&r.ambulance_required&&<label>Assign ambulance<select value={r.ambulance_id||''} onChange={e=>update(r.id,'Ambulance Assigned',e.target.value)}><option value=''>Select ambulance</option>{units.map(a=><option key={a.id} value={a.id}>{a.vehicle_code}</option>)}</select></label>}{user.role!=='student'&&<select value={r.status} onChange={e=>update(r.id,e.target.value)}>{['Referral Created','Hospital Selected','Ambulance Assigned','Patient Dispatched','Patient Referred','Completed','Cancelled'].map(s=><option key={s}>{s}</option>)}</select>}</article>)}</div></>;
+ const {user}=useAuth(),[rows,setRows]=useState([]),[hospitals,setHospitals]=useState([]),[units,setUnits]=useState([]),[message,setMessage]=useState('');const load=()=>api.get('/referrals').then(r=>setRows(r.data));useEffect(()=>{load();if(user.role!=='student'){api.get('/referrals/hospitals').then(r=>setHospitals(r.data));api.get('/ambulances').then(r=>setUnits(r.data))}},[]);const create=async e=>{e.preventDefault();const form=e.currentTarget;const d=new FormData(form);try{await api.post('/referrals',{username:d.get('username'),hospitalId:Number(d.get('hospital')),reason:d.get('reason'),medicalNotes:d.get('notes'),ambulanceRequired:d.get('ambulance')==='yes'});setMessage('Referral created.');form.reset();load()}catch(e){setMessage(e.response?.data?.message||'Could not create referral.')}};const update=async(id,status,ambulanceId)=>{await api.put(`/referrals/${id}`,{status,ambulanceId:ambulanceId||undefined});load()};return <><h3>{user.role==='student'?'My hospital referrals':'Hospital referrals'}</h3>{message&&<p className="notice">{message}</p>}{user.role!=='student'&&<form className="panel booking" onSubmit={create}><label>Student username<input name="username" required placeholder="24BAI1278"/></label><label>External hospital<select required name="hospital"><option value="">Select hospital</option>{hospitals.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}</select></label><label>Referral reason<textarea name="reason" required/></label><label>Medical notes<textarea name="notes"/></label><label>Ambulance required<select name="ambulance"><option value="no">No</option><option value="yes">Yes</option></select></label><button>Generate referral</button></form>}<div className="list">{rows.map(r=><article className="panel" key={r.id}><b>{r.referral_code} · {r.hospital}</b><p>{r.patient_name} · {r.patient_username} · {r.block}</p><p>{r.reason}</p><p>Ambulance: {r.vehicle_code|| (r.ambulance_required?'Required':'No')} · Status: <b>{r.status}</b> · Created {date(r.created_at)}</p>{user.role!=='student'&&r.ambulance_required&&<label>Assign ambulance<select value={r.ambulance_id||''} onChange={e=>update(r.id,'Ambulance Assigned',e.target.value)}><option value=''>Select ambulance</option>{units.map(a=><option key={a.id} value={a.id}>{a.vehicle_code}</option>)}</select></label>}{user.role!=='student'&&<select value={r.status} onChange={e=>update(r.id,e.target.value)}>{['Referral Created','Hospital Selected','Ambulance Assigned','Patient Dispatched','Patient Referred','Completed','Cancelled'].map(s=><option key={s}>{s}</option>)}</select>}</article>)}</div></>;
 }
 function PortalPage({ page }) {
   const { user } = useAuth();
@@ -1125,7 +1182,7 @@ function PortalPage({ page }) {
       ) : page === "book-appointment" ? (
         <Booking />
       ) : page === "appointments" ? (
-        user.role === "staff" ? <StaffAppointments /> : <Appointments />
+        user.role !== "student" ? <StaffAppointments /> : <Appointments />
       ) : page === "history" ? (
         <Appointments />
       ) : page === "students" ? (

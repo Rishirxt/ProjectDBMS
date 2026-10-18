@@ -181,6 +181,43 @@ button:disabled,
   text-decoration: none;
 }
 
+.appointment-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.appointment-action {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 1.15rem;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.appointment-action.complete {
+  background: var(--success-bg);
+  color: var(--success-text);
+  border-color: var(--success-border);
+}
+
+.appointment-action.complete:hover {
+  background: #dcfce7;
+}
+
+.appointment-action.cancel {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.appointment-action.cancel:hover {
+  background: #fee2e2;
+}
+
 /* ==========================================================================
    Form Controls
    ========================================================================== */
@@ -658,6 +695,7 @@ tbody tr:hover {
 }
 
 .badge.scheduled,
+.badge.rescheduled,
 .badge.Confirmed,
 .badge.Preparing,
 .badge.Assigned,

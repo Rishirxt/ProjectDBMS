@@ -4,7 +4,10 @@ CREATE TABLE IF NOT EXISTS student_blocks (
 );
 INSERT INTO student_blocks(name) VALUES ('Block A'),('Block B'),('Block D'),('Block E'),('Block F') ON CONFLICT (name) DO NOTHING;
 ALTER TABLE patients ADD COLUMN IF NOT EXISTS block_id INTEGER REFERENCES student_blocks(id);
-ALTER TABLE patients ADD COLUMN IF NOT EXISTS academic_year SMALLINT CHECK (academic_year BETWEEN 1 AND 6);
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS academic_year SMALLINT;
+ALTER TABLE patients DROP CONSTRAINT IF EXISTS patients_academic_year_check;
+ALTER TABLE patients ADD CONSTRAINT patients_academic_year_check CHECK (academic_year BETWEEN 1 AND 5);
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS rescheduled_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS medicines (
   id SERIAL PRIMARY KEY, name VARCHAR(160) NOT NULL, description TEXT, dosage VARCHAR(120),
   stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0), is_available BOOLEAN NOT NULL DEFAULT true,

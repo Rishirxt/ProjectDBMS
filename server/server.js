@@ -9,6 +9,19 @@ const app = express(),
   usernameRegex = /^[0-9]{2}[A-Z]{3}[0-9]{4}$/,
   gmailRegex = /^[A-Z0-9._%+-]+@gmail\.com$/i,
   phoneRegex = /^\d{10}$/;
+
+// Express 4 does not forward rejected async route handlers to error middleware.
+// Wrap async handlers at registration time so database failures get a response.
+const asyncRoute = (handler) => (req, res, next) =>
+  Promise.resolve(handler(req, res, next)).catch(next);
+for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+  const register = app[method].bind(app);
+  app[method] = (...args) => register(...args.map((handler) =>
+    Array.isArray(handler)
+      ? handler.map((item) => item?.constructor?.name === 'AsyncFunction' ? asyncRoute(item) : item)
+      : handler?.constructor?.name === 'AsyncFunction' ? asyncRoute(handler) : handler,
+  ));
+}
 app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173" }));
 app.use(express.json());
 const userFields =
@@ -35,12 +48,13 @@ app.post("/api/auth/signup", async (req, res) => {
     username = username?.trim().toUpperCase();
     email = email?.trim().toLowerCase();
     phone = phone?.trim();
+    console.log("[AUTH SIGNUP]", { username, email, block, academicYear });
     if (!usernameRegex.test(username))
       return res
         .status(400)
         .json({ message: "Username must match 24BAI1278 format." });
     if (
-      !fullName || !block || !['Block A','Block B','Block D','Block E','Block F'].includes(block) || ![1,2,3,4,5,6].includes(Number(academicYear)) ||
+      !fullName || !block || !['Block A','Block B','Block D','Block E','Block F'].includes(block) || ![1,2,3,4,5].includes(Number(academicYear)) ||
       !email ||
       !password ||
       patientType !== "student"
@@ -68,10 +82,23 @@ app.post("/api/auth/signup", async (req, res) => {
       res.status(201).json({ user: u.rows[0] });
     } catch (e) {
       await client.query("ROLLBACK");
-      if (e.code === "23505")
+      if (e.code === "23505") {
+        const detail = e.detail || "";
+        const constraint = e.constraint || "";
+        if (constraint.includes("username") || detail.includes("username") || detail.includes("Key (username)")) {
+          return res
+            .status(409)
+            .json({ message: `College registration number '${username}' is already registered. Please login instead or use your registration number.` });
+        }
+        if (constraint.includes("email") || detail.includes("email") || detail.includes("Key (email)")) {
+          return res
+            .status(409)
+            .json({ message: `Email address '${email}' is already registered. Please use another email or login.` });
+        }
         return res
           .status(409)
           .json({ message: "Username or email already exists." });
+      }
       throw e;
     } finally {
       client.release();
@@ -233,9 +260,10 @@ app.delete(
     res.status(204).end();
   },
 );
-app.get("/api/doctors", async (req, res) => {
+app.get("/api/doctors", authenticateToken, async (req, res) => {
   const { department, search, specialization } = req.query;
-  let sql = `SELECT d.*,u.full_name,u.username,dp.name department FROM doctors d JOIN users u ON u.id=d.user_id JOIN departments dp ON dp.id=d.department_id WHERE u.is_active=true`,
+  // Keep account identifiers and contact details out of student doctor listings.
+  let sql = `SELECT d.id,d.department_id,d.specialization,d.qualification,d.experience,u.full_name,dp.name department FROM doctors d JOIN users u ON u.id=d.user_id JOIN departments dp ON dp.id=d.department_id WHERE u.is_active=true`,
     p = [];
   if (department) {
     p.push(department);
@@ -295,9 +323,9 @@ app.post(
     }
   },
 );
-app.get("/api/doctors/:id", async (req, res) => {
+app.get("/api/doctors/:id", authenticateToken, async (req, res) => {
   const q = await pool.query(
-    `SELECT d.*,u.full_name,u.username,u.email,u.phone,dp.name department FROM doctors d JOIN users u ON u.id=d.user_id JOIN departments dp ON dp.id=d.department_id WHERE d.id=$1`,
+    `SELECT d.id,d.department_id,d.specialization,d.qualification,d.experience,u.full_name,dp.name department FROM doctors d JOIN users u ON u.id=d.user_id JOIN departments dp ON dp.id=d.department_id WHERE d.id=$1 AND u.is_active=true`,
     [req.params.id],
   );
   if (!q.rowCount) return res.status(404).json({ message: "Doctor not found" });
@@ -518,7 +546,7 @@ app.put("/api/appointments/:id", authenticateToken, async (req, res) => {
   const { status } = req.body;
   let ownership =
     req.user.role === "student"
-      ? " AND patient_id=(SELECT id FROM patients WHERE user_id=$2)"
+      ? " AND patient_id=(SELECT id FROM patients WHERE user_id=$3)"
       : "";
   if (req.user.role === "student" && status !== "cancelled")
     return res
@@ -536,6 +564,78 @@ app.put("/api/appointments/:id", authenticateToken, async (req, res) => {
     return res.status(404).json({ message: "Appointment not found" });
   res.json(q.rows[0]);
 });
+app.put(
+  "/api/appointments/:id/reschedule",
+  authenticateToken,
+  authorizeRoles("staff", "admin"),
+  async (req, res) => {
+    const { date, time } = req.body;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "") || !/^\d{2}:\d{2}$/.test(time || ""))
+      return res.status(400).json({ message: "A valid appointment date and time are required." });
+
+    const [year, month, dayOfMonth] = date.split("-").map(Number);
+    const selectedDate = new Date(year, month - 1, dayOfMonth);
+    if (selectedDate.getFullYear() !== year || selectedDate.getMonth() !== month - 1 || selectedDate.getDate() !== dayOfMonth)
+      return res.status(400).json({ message: "A valid appointment date and time are required." });
+    const [hour, minute] = time.split(":").map(Number);
+    if (hour > 23 || minute > 59)
+      return res.status(400).json({ message: "A valid appointment date and time are required." });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const lastBookableDate = new Date(today);
+    lastBookableDate.setDate(today.getDate() + 9);
+    if (selectedDate < today || selectedDate > lastBookableDate)
+      return res.status(400).json({ message: "Appointments can only be rescheduled within the next 10 days." });
+
+    const appointment = await pool.query(
+      "SELECT doctor_id FROM appointments WHERE id=$1 AND status='scheduled'",
+      [req.params.id],
+    );
+    if (!appointment.rowCount)
+      return res.status(409).json({ message: "Only scheduled appointments can be rescheduled." });
+
+    const day = [
+      "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    ][new Date(`${date}T12:00:00`).getDay()];
+    const availability = await pool.query(
+      "SELECT start_time,end_time FROM doctor_availability WHERE doctor_id=$1 AND day_of_week=$2",
+      [appointment.rows[0].doctor_id, day],
+    );
+    const selectedMinutes = hour * 60 + minute;
+    const hasSlot = availability.rows.some((window) => {
+      const [startHour, startMinute] = window.start_time.slice(0, 5).split(":").map(Number);
+      const [endHour, endMinute] = window.end_time.slice(0, 5).split(":").map(Number);
+      const startMinutes = startHour * 60 + startMinute;
+      const endMinutes = endHour * 60 + endMinute;
+      return selectedMinutes >= startMinutes &&
+        selectedMinutes < endMinutes &&
+        (selectedMinutes - startMinutes) % 30 === 0;
+    });
+    if (!hasSlot)
+      return res.status(400).json({ message: "The selected time is outside the doctor's available slots." });
+
+    const occupied = await pool.query(
+      "SELECT 1 FROM appointments WHERE doctor_id=$1 AND appointment_date=$2 AND appointment_time=$3 AND id<>$4",
+      [appointment.rows[0].doctor_id, date, time, req.params.id],
+    );
+    if (occupied.rowCount)
+      return res.status(409).json({ message: "That appointment slot is already booked." });
+
+    try {
+      const updated = await pool.query(
+        "UPDATE appointments SET appointment_date=$1,appointment_time=$2,rescheduled_at=NOW() WHERE id=$3 AND status='scheduled' RETURNING *",
+        [date, time, req.params.id],
+      );
+      if (!updated.rowCount)
+        return res.status(409).json({ message: "Only scheduled appointments can be rescheduled." });
+      res.json(updated.rows[0]);
+    } catch (error) {
+      if (error.code === "23505")
+        return res.status(409).json({ message: "That appointment slot is already booked." });
+      throw error;
+    }
+  },
+);
 const prescriptionSql = `SELECT pr.*, p.user_id, u.username patient_username, u.full_name patient_name,
   COALESCE(st.full_name, du.full_name, 'Hospital Staff') prescribed_by,
   a.appointment_date, a.appointment_time
@@ -547,6 +647,8 @@ const prescriptionSql = `SELECT pr.*, p.user_id, u.username patient_username, u.
   LEFT JOIN users du ON du.id=d.user_id
   LEFT JOIN appointments a ON a.id=pr.appointment_id`;
 app.get("/api/prescriptions", authenticateToken, async (req, res) => {
+  if (!['student', 'staff', 'admin'].includes(req.user.role))
+    return res.status(403).json({ message: "Insufficient permissions" });
   const params = [];
   let where = '';
   if (req.user.role === 'student') {
@@ -624,7 +726,7 @@ app.get(
   async (_, res) => {
     const [counts, byDept] = await Promise.all([
       pool.query(
-        "SELECT (SELECT count(*) FROM patients) patients,(SELECT count(*) FROM doctors) doctors,(SELECT count(*) FROM departments) departments,(SELECT count(*) FROM appointments WHERE appointment_date=CURRENT_DATE) today,(SELECT count(*) FROM appointments WHERE appointment_date>=date_trunc('week',CURRENT_DATE)) week,(SELECT count(*) FROM appointments WHERE appointment_date>=date_trunc('month',CURRENT_DATE)) month",
+        'SELECT (SELECT count(*) FROM patients) patients,(SELECT count(*) FROM doctors) doctors,(SELECT count(*) FROM departments) departments,(SELECT count(*) FROM appointments WHERE appointment_date=CURRENT_DATE) today,(SELECT count(*) FROM appointments WHERE appointment_date>=date_trunc(\'week\',CURRENT_DATE)) week,(SELECT count(*) FROM appointments WHERE appointment_date>=date_trunc(\'month\',CURRENT_DATE)) "month"',
       ),
       pool.query(
         "SELECT d.name,count(a.id)::int appointments FROM departments d LEFT JOIN doctors dr ON dr.department_id=d.id LEFT JOIN appointments a ON a.doctor_id=dr.id GROUP BY d.name ORDER BY appointments DESC",
@@ -881,7 +983,7 @@ app.post('/api/pharmacy/orders', authenticateToken, authorizeRoles('student'), a
 app.put('/api/pharmacy/orders/:id', authenticateToken, authorizeRoles('staff','admin'), async(req,res)=>{const statuses=['Pending','Confirmed','Preparing','Ready for Collection','Collected','Cancelled'];if(!statuses.includes(req.body.status))return res.status(400).json({message:'Invalid order status.'});const c=await pool.connect();try{await c.query('BEGIN');const old=await c.query('SELECT * FROM pharmacy_orders WHERE id=$1 FOR UPDATE',[req.params.id]);if(!old.rowCount){await c.query('ROLLBACK');return res.status(404).json({message:'Order not found'});}if(['Cancelled','Collected'].includes(old.rows[0].status)&&req.body.status!==old.rows[0].status){await c.query('ROLLBACK');return res.status(409).json({message:'This order is closed and cannot be changed.'});}if(req.body.status==='Cancelled'&&old.rows[0].status!=='Cancelled'){await c.query('UPDATE medicines m SET stock=m.stock+i.quantity FROM (SELECT medicine_id,SUM(quantity)::int quantity FROM pharmacy_order_items WHERE order_id=$1 GROUP BY medicine_id) i WHERE i.medicine_id=m.id',[req.params.id]);}const q=await c.query('UPDATE pharmacy_orders SET status=$1,updated_at=NOW() WHERE id=$2 RETURNING *',[req.body.status,req.params.id]);await c.query('COMMIT');res.json(q.rows[0]);}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}});
 app.get('/api/ambulances', authenticateToken, authorizeRoles('staff','admin'), async(_,res)=>res.json((await pool.query('SELECT * FROM ambulances ORDER BY vehicle_code')).rows));
 app.post('/api/ambulances', authenticateToken, authorizeRoles('admin'), async(req,res)=>{if(!req.body.vehicleCode)return res.status(400).json({message:'Vehicle code is required.'});const q=await pool.query('INSERT INTO ambulances(vehicle_code,notes) VALUES($1,$2) RETURNING *',[req.body.vehicleCode,req.body.notes||null]);res.status(201).json(q.rows[0]);});
-app.post('/api/ambulance-requests', authenticateToken, authorizeRoles('student'), async(req,res,next)=>{
+app.post('/api/ambulance-requests', authenticateToken, authorizeRoles('student','patient'), async(req,res,next)=>{
   try {
     const check = await pool.query('SELECT p.id, p.block_id FROM patients p WHERE p.user_id=$1', [req.user.id]);
     if (!check.rowCount) return res.status(404).json({ message: 'Student profile not found.' });
@@ -905,7 +1007,7 @@ app.post('/api/ambulance-requests', authenticateToken, authorizeRoles('student')
     res.status(201).json(q.rows[0]);
   } catch(e) { next(e); }
 });
-app.get('/api/ambulance-requests', authenticateToken, async(req,res)=>{const own=req.user.role==='student';const q=await pool.query(`SELECT a.*,u.username patient_username,u.full_name patient_name,COALESCE(b.name, 'Block A') block,am.vehicle_code FROM ambulance_requests a JOIN patients p ON p.id=a.patient_id JOIN users u ON u.id=p.user_id LEFT JOIN student_blocks b ON b.id=a.block_id LEFT JOIN ambulances am ON am.id=a.ambulance_id WHERE ($1::int IS NULL OR p.user_id=$1) ORDER BY a.requested_at DESC`,[own?req.user.id:null]);res.json(q.rows);});
+app.get('/api/ambulance-requests', authenticateToken, async(req,res)=>{const own=['student','patient'].includes(req.user.role);const q=await pool.query(`SELECT a.*,u.username patient_username,u.full_name patient_name,COALESCE(b.name, 'Block A') block,am.vehicle_code FROM ambulance_requests a JOIN patients p ON p.id=a.patient_id JOIN users u ON u.id=p.user_id LEFT JOIN student_blocks b ON b.id=a.block_id LEFT JOIN ambulances am ON am.id=a.ambulance_id WHERE ($1::int IS NULL OR p.user_id=$1) AND NOT EXISTS (SELECT 1 FROM hospital_referrals r WHERE r.ambulance_request_id=a.id) ORDER BY a.requested_at DESC`,[own?req.user.id:null]);res.json(q.rows);});
 app.put('/api/ambulance-requests/:id', authenticateToken, authorizeRoles('staff','admin'), async(req,res)=>{const states=['Requested','Assigned','Ambulance Dispatched','Arrived','Completed','Cancelled'];if(!states.includes(req.body.status))return res.status(400).json({message:'Invalid ambulance status.'});const c=await pool.connect();try{await c.query('BEGIN');const old=await c.query('SELECT ambulance_id FROM ambulance_requests WHERE id=$1 FOR UPDATE',[req.params.id]);if(!old.rowCount){await c.query('ROLLBACK');return res.status(404).json({message:'Request not found'});}const q=await c.query('UPDATE ambulance_requests SET status=$1,ambulance_id=COALESCE($2,ambulance_id),updated_at=NOW() WHERE id=$3 RETURNING *',[req.body.status,req.body.ambulanceId||null,req.params.id]);if(req.body.ambulanceId)await c.query('UPDATE ambulances SET is_available=false WHERE id=$1',[req.body.ambulanceId]);if(['Completed','Cancelled'].includes(req.body.status)&&old.rows[0].ambulance_id)await c.query('UPDATE ambulances SET is_available=true WHERE id=$1',[old.rows[0].ambulance_id]);await c.query('COMMIT');res.json(q.rows[0]);}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}});
 app.get('/api/referrals/hospitals', authenticateToken, authorizeRoles('staff','admin'), async(_,res)=>res.json((await pool.query('SELECT * FROM external_hospitals WHERE is_active ORDER BY name')).rows));
 app.post('/api/referrals/hospitals', authenticateToken, authorizeRoles('admin'), async(req,res)=>{if(!req.body.name)return res.status(400).json({message:'Hospital name is required.'});const q=await pool.query('INSERT INTO external_hospitals(name,address,phone) VALUES($1,$2,$3) RETURNING *',[req.body.name,req.body.address||null,req.body.phone||null]);res.status(201).json(q.rows[0]);});
@@ -937,10 +1039,20 @@ app.post('/api/referrals', authenticateToken, authorizeRoles('staff','admin'), a
   } catch(e) { next(e); }
 });
 app.put('/api/referrals/:id', authenticateToken, authorizeRoles('staff','admin'), async(req,res)=>{const states=['Referral Created','Hospital Selected','Ambulance Assigned','Patient Dispatched','Patient Referred','Completed','Cancelled'];if(!states.includes(req.body.status))return res.status(400).json({message:'Invalid referral status.'});const c=await pool.connect();try{await c.query('BEGIN');if(req.body.ambulanceId){const a=await c.query('UPDATE ambulance_requests SET ambulance_id=$1,status=\'Assigned\',updated_at=NOW() WHERE id=(SELECT ambulance_request_id FROM hospital_referrals WHERE id=$2) RETURNING id',[req.body.ambulanceId,req.params.id]);if(!a.rowCount){await c.query('ROLLBACK');return res.status(400).json({message:'This referral does not have an ambulance request.'});}await c.query('UPDATE ambulances SET is_available=false WHERE id=$1',[req.body.ambulanceId]);}const q=await c.query('UPDATE hospital_referrals SET status=$1,updated_at=NOW() WHERE id=$2 RETURNING *',[req.body.ambulanceId?'Ambulance Assigned':req.body.status,req.params.id]);if(!q.rowCount){await c.query('ROLLBACK');return res.status(404).json({message:'Referral not found'});}await c.query('COMMIT');res.json(q.rows[0]);}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}});
-app.use(
-  (err, _, res, __) => (
-    console.error(err),
-    res.status(500).json({ message: "Unexpected server error" })
-  ),
-);
+app.use((err, req, res, _) => {
+  console.error(`[api] ${req.method} ${req.originalUrl} failed:`, err);
+  if (res.headersSent) return;
+  const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 500
+    ? err.status
+    : Number.isInteger(err.statusCode) && err.statusCode >= 400 && err.statusCode < 500
+      ? err.statusCode
+      : 500;
+  res.status(status).json({
+    message: status === 500
+      ? 'Unexpected server error. Check the API server log for details.'
+      : err.type === 'entity.parse.failed'
+        ? 'Request body must contain valid JSON.'
+        : err.message,
+  });
+});
 app.listen(process.env.PORT || 5000, () => console.log("API listening"));
